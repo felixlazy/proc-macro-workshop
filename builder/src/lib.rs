@@ -21,12 +21,10 @@ fn parse(input: &DeriveInput) -> Result<proc_macro2::TokenStream, Error> {
 
     let (idents, tys): (Vec<_>, Vec<_>) = fields_named.iter().cloned().unzip();
     let functions = quote! {
-        impl #builder_name{
             #(fn #idents(&mut self,#idents:#tys)->&mut Self{
                 self.#idents=std::option::Option::Some(#idents);
                 self
             })*
-        }
     };
     Ok(quote! {
         struct #builder_name{
@@ -39,7 +37,16 @@ fn parse(input: &DeriveInput) -> Result<proc_macro2::TokenStream, Error> {
                 }
             }
         }
-        #functions
+
+        impl #builder_name{
+            #functions
+            fn build(&self)->std::option::Option<#ident>{
+                std::option::Option::Some(#ident{
+                    #(#idents: self.#idents.clone().unwrap()),*
+                })
+            }
+        }
+
     })
 }
 fn extract_named_fields(
