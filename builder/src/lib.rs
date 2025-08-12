@@ -14,41 +14,80 @@ fn parse(input: &DeriveInput) -> Result<proc_macro2::TokenStream, Error> {
     let ident = &input.ident;
     let builder_name = quote::format_ident!("{ident}Builder");
     let fields = extract_named_fields(input)?;
-    let fields_named = fields
-        .iter()
-        .filter_map(|f| f.ident.as_ref().map(|ident| (ident, &f.ty)))
-        .collect::<Vec<_>>();
 
-    let (idents, tys): (Vec<_>, Vec<_>) = fields_named.iter().cloned().unzip();
-    let functions = quote! {
-            #(fn #idents(&mut self,#idents:#tys)->&mut Self{
-                self.#idents=std::option::Option::Some(#idents);
-                self
-            })*
-    };
-    Ok(quote! {
-        struct #builder_name{
-            #(#idents:std::option::Option<#tys>),*
+    let mut idents = Vec::new();
+    let mut types = Vec::new();
+    let mut build_fields = Vec::new();
+    let mut setters = Vec::new();
+
+    for f in fields.iter() {
+        let field_ident = if let Some(ident) = f.ident.as_ref() {
+            ident
+        } else {
+            return Err(Error::new_spanned(input, "没有匹配到结构体成员"));
+        };
+        let field_ty = &f.ty;
+
+        if is_type_option(field_ty) {
+            // 如果字段本身是 Option<T>
+            let inner_ty = extract_option_type(field_ty)
+                .ok_or_else(|| Error::new_spanned(field_ty, "无法提取 Option 内部类型"))?;
+            idents.push(field_ident);
+            types.push(quote! { #field_ty }); // 直接用原类型 Option<T>
+
+            build_fields.push(quote! {
+                #field_ident: self.#field_ident
+            });
+
+            setters.push(quote! {
+                fn #field_ident(mut self, #field_ident: #inner_ty) -> Self {
+                    self.#field_ident = std::option::Option::Some(#field_ident);
+                    self
+                }
+            });
+        } else {
+            // 普通字段，builder 中用 Option<字段类型>
+            idents.push(field_ident);
+            types.push(quote! { std::option::Option<#field_ty> });
+
+            build_fields.push(quote! {
+                #field_ident: self.#field_ident.ok_or(format!("{} not set",stringify!(#field_ident)))?
+            });
+
+            setters.push(quote! {
+                fn #field_ident(mut self, #field_ident: #field_ty) ->  Self {
+                    self.#field_ident = std::option::Option::Some(#field_ident);
+                    self
+                }
+            });
         }
-        impl #ident{
-            fn builder()->#builder_name{
-                #builder_name{
-                    #(#idents:std::option::Option::None),*
+    }
+
+    Ok(quote! {
+        struct #builder_name {
+            #(#idents: #types),*
+        }
+
+        impl #ident {
+            fn builder() -> #builder_name {
+                #builder_name {
+                    #(#idents: std::option::Option::None),*
                 }
             }
         }
 
-        impl #builder_name{
-            #functions
-            fn build(&self)->std::option::Option<#ident>{
-                std::option::Option::Some(#ident{
-                    #(#idents: self.#idents.clone().unwrap()),*
+        impl #builder_name {
+            #(#setters)*
+
+            fn build(self) -> std::result::Result<#ident,std::boxed::Box<dyn std::error::Error>> {
+                std::result::Result::Ok(#ident {
+                    #(#build_fields),*
                 })
             }
         }
-
     })
 }
+
 fn extract_named_fields(
     input: &DeriveInput,
 ) -> Result<&Punctuated<syn::Field, syn::Token![,]>, Error> {
@@ -61,4 +100,31 @@ fn extract_named_fields(
     } else {
         Err(Error::new_spanned(input, "没有匹配到结构体成员"))
     }
+}
+fn is_type_option(ty: &syn::Type) -> bool {
+    matches!(
+        ty,
+        syn::Type::Path(tp)
+            if tp.qself.is_none()
+                && matches!(
+                    tp.path.segments.last(),
+                    Some(last_segment)
+                        if last_segment.ident == "Option"
+                            && matches!(last_segment.arguments, syn::PathArguments::AngleBracketed(_))
+                )
+    )
+}
+fn extract_option_type(ty: &syn::Type) -> Option<&syn::Type> {
+    if is_type_option(ty) {
+        if let syn::Type::Path(tp) = ty {
+            if let Some(last_segment) = tp.path.segments.last() {
+                if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
+                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                        return Some(inner_ty);
+                    }
+                }
+            }
+        }
+    }
+    None
 }
